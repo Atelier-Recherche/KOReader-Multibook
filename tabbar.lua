@@ -25,6 +25,8 @@ local Session = require("session")
 
 local TabBar = InputContainer:extend{
     name = "multibook_tabbar",
+    -- When true: bar strip only (no fullscreen dismiss); used above classic menu
+    companion = false,
     on_select_tab = nil,
     on_new_tab = nil,
     on_close_tab = nil,
@@ -49,7 +51,6 @@ end
 function TabBar:init()
     local screen_w = Screen:getWidth()
     local screen_h = Screen:getHeight()
-    self.dimen = Geom:new{ x = 0, y = 0, w = screen_w, h = screen_h }
 
     local bar_h = Screen:scaleBySize(36)
     local pad = Size.padding.tiny
@@ -188,35 +189,43 @@ function TabBar:init()
 
     self.bar_height = content:getSize().h
 
-    self[1] = TopContainer:new{
-        dimen = Geom:new{ w = screen_w, h = screen_h },
-        frame,
-    }
-
-    local ratio_y = self.bar_height / screen_h
-    self:registerTouchZones({
-        {
-            id = "multibook_tabbar_dismiss",
-            ges = "tap",
-            screen_zone = {
-                ratio_x = 0,
-                ratio_y = ratio_y,
-                ratio_w = 1,
-                ratio_h = 1 - ratio_y,
+    if self.companion then
+        -- Strip-only hitbox so classic menu below remains tappable
+        self.dimen = Geom:new{ x = 0, y = 0, w = screen_w, h = self.bar_height }
+        self[1] = frame
+    else
+        self.dimen = Geom:new{ x = 0, y = 0, w = screen_w, h = screen_h }
+        self[1] = TopContainer:new{
+            dimen = Geom:new{ w = screen_w, h = screen_h },
+            frame,
+        }
+        local ratio_y = self.bar_height / screen_h
+        self:registerTouchZones({
+            {
+                id = "multibook_tabbar_dismiss",
+                ges = "tap",
+                screen_zone = {
+                    ratio_x = 0,
+                    ratio_y = ratio_y,
+                    ratio_w = 1,
+                    ratio_h = 1 - ratio_y,
+                },
+                handler = function()
+                    self:onClose()
+                    return true
+                end,
             },
-            handler = function()
-                self:onClose()
-                return true
-            end,
-        },
-    })
+        })
+    end
 end
 
 function TabBar:_reopen()
     local offset = self._scroll_offset
+    local companion = self.companion
     UIManager:close(self)
     if self.on_reopen then
         self.on_reopen({
+            companion = companion,
             on_select_tab = self.on_select_tab,
             on_new_tab = self.on_new_tab,
             on_close_tab = self.on_close_tab,

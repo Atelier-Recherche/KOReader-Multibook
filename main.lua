@@ -10,6 +10,7 @@ local DataStorage = require("datastorage")
 local Device = require("device")
 local Dispatcher = require("dispatcher")
 local DocumentRegistry = require("document/documentregistry")
+local Geom = require("ui/geometry")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local PathChooser = require("ui/widget/pathchooser")
@@ -19,6 +20,7 @@ local ffiUtil = require("ffi/util")
 local lfs = require("libs/libkoreader-lfs")
 local _ = require("gettext")
 local T = ffiUtil.template
+local Screen = Device.screen
 
 local Session = require("session")
 local TabBar = require("tabbar")
@@ -88,7 +90,11 @@ function Multibook:_registerGestures()
                 if not Session.top_tap_enabled then
                     return false
                 end
-                self:showTabBar()
+                if Session.tabs_above_menu then
+                    self:showTabBarAboveMenu()
+                else
+                    self:showTabBar()
+                end
                 return true
             end,
         },
@@ -214,13 +220,63 @@ function Multibook:addToMainMenu(menu_items)
                     Session:save()
                 end,
             },
+            {
+                text = _("Tabs above classic menu"),
+                checked_func = function()
+                    return Session.tabs_above_menu
+                end,
+                enabled_func = function()
+                    return Session.top_tap_enabled
+                end,
+                callback = function()
+                    Session.tabs_above_menu = not Session.tabs_above_menu
+                    Session:save()
+                end,
+                separator = true,
+            },
+            {
+                text = _("Use filename as tab title"),
+                checked_func = function()
+                    return Session.use_filename_as_title
+                end,
+                callback = function()
+                    Session.use_filename_as_title = not Session.use_filename_as_title
+                    Session:save()
+                    self:refreshTabBarIfShown()
+                end,
+            },
+            {
+                text = _("Clean filename title"),
+                checked_func = function()
+                    return Session.title_clean_enabled
+                end,
+                enabled_func = function()
+                    return Session.use_filename_as_title
+                end,
+                callback = function()
+                    Session.title_clean_enabled = not Session.title_clean_enabled
+                    Session:save()
+                    self:refreshTabBarIfShown()
+                end,
+            },
+            {
+                text = _("Title clean pattern…"),
+                enabled_func = function()
+                    return Session.use_filename_as_title
+                end,
+                callback = function()
+                    self:editTitleCleanPatternDialog()
+                end,
+            },
         },
     }
 end
 
 function Multibook:onMultibookToggleTabs()
     if self.tabbar then
-        self:hideTabBar()
+        self:dismissTabBarAndMenu()
+    elseif Session.tabs_above_menu then
+        self:showTabBarAboveMenu()
     else
         self:showTabBar()
     end
@@ -240,42 +296,123 @@ end
 function Multibook:showTabBar(extra)
     Session:ensureCurrentTab(self.ui)
     Session:saveActivePos(self.ui)
+    local companion = extra and extra.companion or false
     self:hideTabBar()
     local bar
     bar = TabBar:new{
+        companion = companion,
         _scroll_offset = extra and extra._scroll_offset or 0,
         on_select_tab = function(tab_id)
-            self:hideTabBar()
+            self:dismissTabBarAndMenu()
             self:switchToTab(tab_id)
         end,
         on_new_tab = function()
-            self:hideTabBar()
+            self:dismissTabBarAndMenu()
             self:showNewTabMenu()
         end,
         on_close_tab = function(tab_id)
-            self:hideTabBar()
+            self:dismissTabBarAndMenu()
             self:closeTab(tab_id)
         end,
         on_rename_tab = function(tab_id)
             self:renameTabDialog(tab_id)
         end,
         on_show_all_tabs = function()
-            self:hideTabBar()
+            self:dismissTabBarAndMenu()
             self:showAllTabsDialog()
         end,
         on_close_others = function(tab_id)
-            self:hideTabBar()
+            self:dismissTabBarAndMenu()
             self:closeOtherTabs(tab_id)
         end,
         on_reopen = function(opts)
             self:showTabBar(opts)
+            if opts and opts.companion then
+                self:_offsetMenuBelowTabBar()
+            end
         end,
         on_close = function()
             self.tabbar = nil
+            if companion then
+                self:closeClassicMenuIfOpen()
+            end
         end,
     }
     self.tabbar = bar
     UIManager:show(bar)
+end
+
+--- Open Multibook tabs stacked above the classic KOReader TouchMenu.
+function Multibook:showTabBarAboveMenu()
+    if not self.ui.menu then
+        self:showTabBar()
+        return
+    end
+    if self.ui.menu.menu_container then
+        self.ui.menu:onCloseReaderMenu()
+    end
+    self:hideTabBar()
+    -- Menu first, then companion bar on top of the stack
+    self.ui.menu:onShowMenu()
+    self:showTabBar({ companion = true })
+    -- Offset after menu layout settles
+    UIManager:nextTick(function()
+        if isAlive(self) and self.tabbar and self.tabbar.companion then
+            self:_offsetMenuBelowTabBar()
+        end
+    end)
+end
+
+function Multibook:_offsetMenuBelowTabBar()
+    local menu = self.ui.menu
+    local container = menu and menu.menu_container
+    local bar = self.tabbar
+    if not container or not bar then return end
+    local offset = bar.bar_height or 0
+    container.dimen = Geom:new{
+        x = 0,
+        y = offset,
+        w = Screen:getWidth(),
+        h = Screen:getHeight() - offset,
+    }
+    -- TabBar is above us in the stack; without this, unhandled taps never reach the menu
+    container.is_always_active = true
+    -- UIManager paints at window.x/y captured by show(), not at widget.dimen.y
+    for i = #UIManager._window_stack, 1, -1 do
+        local window = UIManager._window_stack[i]
+        if window.widget == container then
+            window.x = 0
+            window.y = offset
+            break
+        end
+    end
+    local touch_menu = container[1]
+    if touch_menu and not touch_menu._multibook_close_wrapped then
+        touch_menu._multibook_close_wrapped = true
+        local prev = touch_menu.close_callback
+        touch_menu.close_callback = function(...)
+            if prev then prev(...) end
+            if self.tabbar and self.tabbar.companion then
+                UIManager:close(self.tabbar)
+                self.tabbar = nil
+            end
+        end
+    end
+    UIManager:setDirty("all", "ui")
+end
+
+function Multibook:closeClassicMenuIfOpen()
+    if self.ui.menu and self.ui.menu.menu_container then
+        self.ui.menu:onCloseReaderMenu()
+    end
+end
+
+function Multibook:dismissTabBarAndMenu()
+    local was_companion = self.tabbar and self.tabbar.companion
+    self:hideTabBar()
+    if was_companion then
+        self:closeClassicMenuIfOpen()
+    end
 end
 
 function Multibook:hideTabBar()
@@ -286,9 +423,64 @@ function Multibook:hideTabBar()
 end
 
 function Multibook:refreshTabBarIfShown()
-    if self.tabbar then
-        self:showTabBar()
+    if not self.tabbar then return end
+    local companion = self.tabbar.companion
+    self:showTabBar({ companion = companion })
+    if companion then
+        self:_offsetMenuBelowTabBar()
     end
+end
+
+function Multibook:editTitleCleanPatternDialog()
+    local input_dialog
+    input_dialog = InputDialog:new{
+        title = _("Title clean pattern (Lua)"),
+        description = _("First capture group becomes the title. Default extracts the 2nd “ - ” segment."),
+        input = Session.title_clean_pattern or Session.DEFAULT_TITLE_CLEAN_PATTERN,
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function()
+                        UIManager:close(input_dialog)
+                    end,
+                },
+                {
+                    text = _("Default"),
+                    callback = function()
+                        input_dialog:setInputText(Session.DEFAULT_TITLE_CLEAN_PATTERN)
+                    end,
+                },
+                {
+                    text = _("Save"),
+                    is_enter_default = true,
+                    callback = function()
+                        local pattern = input_dialog:getInputText()
+                        UIManager:close(input_dialog)
+                        if not pattern or pattern == "" then
+                            pattern = Session.DEFAULT_TITLE_CLEAN_PATTERN
+                        end
+                        local ok = pcall(function()
+                            ("test"):match(pattern)
+                        end)
+                        if not ok then
+                            UIManager:show(InfoMessage:new{
+                                text = _("Invalid Lua pattern."),
+                                timeout = 2,
+                            })
+                            return
+                        end
+                        Session.title_clean_pattern = pattern
+                        Session:save()
+                        self:refreshTabBarIfShown()
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(input_dialog)
+    input_dialog:onShowKeyboard()
 end
 
 function Multibook:showNewTabMenu()

@@ -7,14 +7,22 @@ local DataStorage = require("datastorage")
 local LuaSettings = require("luasettings")
 local ffiUtil = require("ffi/util")
 
+-- Lua pattern: 1st capture = cleaned title (e.g. 2nd " - " segment)
+local DEFAULT_TITLE_CLEAN_PATTERN = "^.- %- (.-) %-"
+
 local Session = {
     settings_file = DataStorage:getSettingsDir() .. "/multibook.lua",
     settings = nil,
+    DEFAULT_TITLE_CLEAN_PATTERN = DEFAULT_TITLE_CLEAN_PATTERN,
     -- persisted / live state
     tabs = {},
     active_id = nil,
     -- UI prefs
     top_tap_enabled = true,
+    tabs_above_menu = false,
+    use_filename_as_title = false,
+    title_clean_enabled = false,
+    title_clean_pattern = DEFAULT_TITLE_CLEAN_PATTERN,
     -- transient: restore after switchDocument
     pending_goto = nil,
     _id_seq = 0,
@@ -28,6 +36,14 @@ local function ensureSettings()
             Session.tabs = data.tabs or {}
             Session.active_id = data.active_id
             Session.top_tap_enabled = data.top_tap_enabled ~= false
+            Session.tabs_above_menu = data.tabs_above_menu == true
+            Session.use_filename_as_title = data.use_filename_as_title == true
+            Session.title_clean_enabled = data.title_clean_enabled == true
+            if type(data.title_clean_pattern) == "string" and data.title_clean_pattern ~= "" then
+                Session.title_clean_pattern = data.title_clean_pattern
+            else
+                Session.title_clean_pattern = DEFAULT_TITLE_CLEAN_PATTERN
+            end
             Session._id_seq = data._id_seq or 0
         end
     end
@@ -43,6 +59,10 @@ function Session:save()
         tabs = self.tabs,
         active_id = self.active_id,
         top_tap_enabled = self.top_tap_enabled,
+        tabs_above_menu = self.tabs_above_menu,
+        use_filename_as_title = self.use_filename_as_title,
+        title_clean_enabled = self.title_clean_enabled,
+        title_clean_pattern = self.title_clean_pattern,
         _id_seq = self._id_seq,
     })
     self.settings:flush()
@@ -114,12 +134,38 @@ function Session:indexOf(id)
     return nil
 end
 
+local function fileBasename(file)
+    if not file then return nil end
+    return file:gsub(".*/", ""):gsub("%.[^%.]+$", "")
+end
+
+local function applyCleanPattern(name)
+    if not name or name == "" then return name end
+    if not Session.title_clean_enabled then return name end
+    local pattern = Session.title_clean_pattern
+    if type(pattern) ~= "string" or pattern == "" then
+        pattern = DEFAULT_TITLE_CLEAN_PATTERN
+    end
+    local ok, captured = pcall(function()
+        return name:match(pattern)
+    end)
+    if ok and type(captured) == "string" and captured ~= "" then
+        return captured
+    end
+    return name
+end
+
 local function shortTitle(file, doc_title)
+    local basename = fileBasename(file)
+    if Session.use_filename_as_title then
+        if not basename then return "?" end
+        return applyCleanPattern(basename)
+    end
     if doc_title and doc_title ~= "" then
         return doc_title
     end
-    if not file then return "?" end
-    return file:gsub(".*/", ""):gsub("%.[^%.]+$", "")
+    if not basename then return "?" end
+    return basename
 end
 
 function Session.makeDisplayTitle(tab)
